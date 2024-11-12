@@ -1,0 +1,730 @@
+#!/bin/bash
+
+# -----------
+# Variables
+# -----------
+
+
+source activate pyk_cgo
+
+KERNELS=("02_yAx" "binning_kksort_BinningKKSort" "force_lj_neigh_fullneigh_reduce"  "integrator_nve_initial_integrate"  "property_temperature_compute_workunit" "input_init_system" "nstream_nstream" "team_policy_yAx" "force_lj_neigh_fullneigh_for" "integrator_nve_final_integrate" "property_kine_work")
+
+BASE_DIR=$(pwd)
+OUTPUT_FILE=$BASE_DIR/res-clang-openmp-ms.txt
+GCC_OUTPUT_FILE=$BASE_DIR/res-gcc-openmp-ms.txt
+
+COMPILER=${2:-g++} # g++ or clang++
+export PK_COMPILER="${COMPILER}" # for pykokkos compile.sh
+EXEC_SPACE=${3:-OpenMP} # Serial or OpenMP
+echo "Using compiler $COMPILER"
+echo "Using execution space $EXEC_SPACE"
+# MODE=$3 # normal or yalla
+
+# # kokkos related
+KOKKOS_PATH=`python -c "import importlib; print(importlib.import_module('kokkos').__file__)"`
+KOKKOS_PATH="${KOKKOS_PATH/"/kokkos/__init__.py"/}" # remove "/kokkos/__init__.py" from the end of the string
+
+echo "Got Kokkos Path ${KOKKOS_PATH}"
+
+KOKKOS_LIB_PATH="${KOKKOS_PATH}/lib"
+if [ ! -d "${KOKKOS_LIB_PATH}" ]; then
+    KOKKOS_LIB_PATH="${KOKKOS_PATH}/lib64"
+fi
+
+KOKKOS_INCLUDE_PATH="${KOKKOS_PATH}/include/kokkos"
+
+# KOKKOS_KERNEL_DIRS=("02")
+KOKKOS_KERNEL_DIRS=("02" "BinningKKSort" "FinalIntegrateFunctor" "ForceLJNeigh_for" "ForceLJNeigh_reduce" "InitialIntegrateFunctor" "init_system_get_n" "KinE" "nstream" "team_policy" "Temperature")
+# Only init_x should be compiled with Serial
+# if [ "${EXEC_SPACE}" == "OpenMP" ]; then
+#     KOKKOS_KERNEL_DIRS=("02" "BinningKKSort" "FinalIntegrateFunctor" "ForceLJNeigh_for" "ForceLJNeigh_reduce" "InitialIntegrateFunctor" "init_system_get_n" "KinE" "nstream" "team_policy" "Temperature")
+# else
+#     KOKKOS_KERNEL_DIRS=("init_system_init_x")
+# fi
+
+echo "Got Kokkos Lib Path ${KOKKOS_LIB_PATH}"
+echo "Got Kokkos Include Path ${KOKKOS_INCLUDE_PATH}"
+
+OMP_FLAG="-fopenmp"
+
+PK_ARG_MEMSPACE=Kokkos::HostSpace
+PK_ARG_LAYOUT=Kokkos::LayoutRight
+MODULE=kernel.cpython-311-x86_64-linux-gnu.so
+CXX_STANDARD=$(g++ -dM -E -DKOKKOS_MACROS_HPP ${KOKKOS_INCLUDE_PATH}/KokkosCore_config.h | grep KOKKOS_ENABLE_CXX | tr -d ' ' | sed -e 's/.*\(..\)$/\1/')
+
+# compilation command
+YALLA_COMMAND="${COMPILER} \
+    -I. \
+    -Wall -Wextra \
+    -march=native -mtune=native \
+    -g \
+    -O3 \
+    -fPIC \
+    -std=c++${CXX_STANDARD} \
+    -DSPACE=${EXEC_SPACE} \
+    -o kernel.yalla.o \
+    -c kernel.yalla.cpp \
+    -Dpk_exec_space=Kokkos::${EXEC_SPACE}"
+
+YALLA_BINDINGS_COMMAND="${COMPILER} \
+    `python3 -m pybind11 --includes` \
+    -I. \
+    -Wall -Wextra \
+    -march=native -mtune=native \
+    -g \
+    -O3 \
+    -isystem ${KOKKOS_INCLUDE_PATH} \
+    -fPIC \
+    ${OMP_FLAG} -std=c++${CXX_STANDARD} \
+    -DSPACE="${EXEC_SPACE}" \
+    -o bindings.yalla.o \
+    -c OpenMP/bindings.yalla.cpp \
+    -Dpk_arg_memspace=${PK_ARG_MEMSPACE} \
+    -Dpk_arg_layout=${PK_ARG_LAYOUT} \
+    -Dpk_exec_space=Kokkos::${EXEC_SPACE}"
+
+YALLA_WRAPPERS_COMMAND="${COMPILER} \
+    -I. \
+    -Wall -Wextra \
+    -march=native -mtune=native \
+    -g \
+    -O3 \
+    -isystem ${KOKKOS_INCLUDE_PATH} \
+    -fPIC \
+    ${OMP_FLAG} -std=c++${CXX_STANDARD} \
+    -DSPACE=${EXEC_SPACE} \
+    -o wrappers.yalla.o \
+    -c wrappers.yalla.cpp"
+
+YALLA_LINK_COMMAND="${COMPILER} \
+    -I.. \
+    -shared \
+    -Wall -Wextra \
+    -march=native -mtune=native \
+    -g \
+    -O3 \
+    ${OMP_FLAG} \
+    kernel.yalla.o \
+    wrappers.yalla.o \
+    bindings.yalla.o \
+    -o ${MODULE}.yalla \
+    ${KOKKOS_LIB_PATH}/libkokkoscontainers.so \
+    ${KOKKOS_LIB_PATH}/libkokkoscore.so"
+
+# compilation command
+YALLA_LTO_COMMAND="${COMPILER} \
+    -I. \
+    -Wall -Wextra \
+    -march=native -mtune=native \
+    -g \
+    -O3 \
+    -fPIC \
+    -flto \
+    -std=c++${CXX_STANDARD} \
+    -DSPACE=${EXEC_SPACE} \
+    -o build/${COMPILER}/kernel.lto.o \
+    -c kernel.yalla.cpp \
+    -Dpk_exec_space=Kokkos::${EXEC_SPACE}"
+
+YALLA_LTO_BINDINGS_COMMAND="${COMPILER} \
+    `python3 -m pybind11 --includes` \
+    -I. \
+    -Wall -Wextra \
+    -march=native -mtune=native \
+    -g \
+    -O3 \
+    -isystem ${KOKKOS_INCLUDE_PATH} \
+    -fPIC \
+    -flto \
+    ${OMP_FLAG} -std=c++${CXX_STANDARD} \
+    -DSPACE="${EXEC_SPACE}" \
+    -o build/${COMPILER}/bindings.lto.o \
+    -c bindings.yalla.cpp \
+    -Dpk_arg_memspace=${PK_ARG_MEMSPACE} \
+    -Dpk_arg_layout=${PK_ARG_LAYOUT} \
+    -Dpk_exec_space=Kokkos::${EXEC_SPACE}"
+
+YALLA_LTO_WRAPPERS_COMMAND="${COMPILER} \
+    -I. \
+    -Wall -Wextra \
+    -march=native -mtune=native \
+    -g \
+    -O3 \
+    -isystem ${KOKKOS_INCLUDE_PATH} \
+    -fPIC \
+    -flto \
+    ${OMP_FLAG} -std=c++${CXX_STANDARD} \
+    -DSPACE=${EXEC_SPACE} \
+    -o build/${COMPILER}/wrappers.lto.o \
+    -c wrappers.yalla.cpp"
+
+YALLA_LTO_LINK_COMMAND="${COMPILER} \
+    -I.. \
+    -Wall -Wextra \
+    -march=native -mtune=native \
+    -g \
+    -O3 \
+    -shared \
+    ${OMP_FLAG} \
+    -flto \
+    build/${COMPILER}/kernel.lto.o \
+    build/${COMPILER}/wrappers.lto.o \
+    build/${COMPILER}/bindings.lto.o \
+    -o build/${COMPILER}/${MODULE}.lto \
+    ${KOKKOS_LIB_PATH}/libkokkoscontainers.so \
+    ${KOKKOS_LIB_PATH}/libkokkoscore.so"
+
+
+NORMAL_COMMAND="${COMPILER} \
+    -I. \
+    -Wall -Wextra \
+    -march=native -mtune=native \
+    -g \
+    -O3 \
+    ${OMP_FLAG} \
+    -isystem ${KOKKOS_INCLUDE_PATH} \
+    -fPIC \
+    -std=c++${CXX_STANDARD} \
+    -DSPACE=${EXEC_SPACE} \
+    -o kernel.normal.o \
+    -c kernel.cpp \
+    -Dpk_exec_space=Kokkos::${EXEC_SPACE}"
+
+NORMAL_BINDINGS_COMMAND="${COMPILER} \
+    `python3 -m pybind11 --includes` \
+    -I. \
+    -Wall -Wextra \
+    -march=native -mtune=native \
+    -g \
+    -O3 \
+    -isystem ${KOKKOS_INCLUDE_PATH} \
+    -fPIC \
+    ${OMP_FLAG} -std=c++${CXX_STANDARD} \
+    -DSPACE="${EXEC_SPACE}" \
+    -o bindings.normal.o \
+    -c OpenMP/bindings.normal.cpp \
+    -Dpk_arg_memspace=${PK_ARG_MEMSPACE} \
+    -Dpk_arg_layout=${PK_ARG_LAYOUT} \
+    -Dpk_exec_space=Kokkos::${EXEC_SPACE}"
+
+NORMAL_LINK_COMMAND="${COMPILER} \
+    -I.. \
+    -Wall -Wextra \
+    -march=native -mtune=native \
+    -g \
+    -O3 \
+    -shared \
+    ${OMP_FLAG} \
+    kernel.normal.o \
+    bindings.normal.o \
+    -o ${MODULE}.normal \
+    ${KOKKOS_LIB_PATH}/libkokkoscontainers.so \
+    ${KOKKOS_LIB_PATH}/libkokkoscore.so"
+
+CLANG_PCH_COMMAND="${COMPILER} \
+    -include-pch ${KOKKOS_INCLUDE_PATH}/Kokkos_Core.hpp.gch \
+    -I. \
+    -O3 \
+    -march=native -mtune=native \
+    -g \
+    ${OMP_FLAG} \
+    -isystem ${KOKKOS_INCLUDE_PATH} \
+    -fPIC \
+    -std=c++${CXX_STANDARD} \
+    -DSPACE=${EXEC_SPACE} \
+    -o build/${COMPILER}/kernel.o \
+    -c kernel.cpp \
+    -Dpk_exec_space=Kokkos::${EXEC_SPACE}"
+
+GCC_PCH_COMMAND="${COMPILER} \
+    -I${KOKKOS_INCLUDE_PATH}/ \
+    -I. \
+    -O3 \
+    -march=native -mtune=native \
+    -g \
+    ${OMP_FLAG} \
+    -isystem ${KOKKOS_INCLUDE_PATH} \
+    -fPIC \
+    -std=c++${CXX_STANDARD} \
+    -DSPACE=${EXEC_SPACE} \
+    -o build/${COMPILER}/kernel.o \
+    -c kernel.cpp \
+    -Dpk_exec_space=Kokkos::${EXEC_SPACE}"
+
+# -----------
+# Functions
+# -----------
+
+# precompile the kokkos headers
+function precompile_kokkos_header() {    
+    (
+    cd $KOKKOS_INCLUDE_PATH
+    echo "Precompiling Kokkos_Core.hpp"
+    $COMPILER -x c++-header Kokkos_Core.hpp -I. ${OMP_FLAG} -O3 -Wall -Wextra -march=native -mtune=native -g -O3 -fPIC -DSPACE=${EXEC_SPACE} -std=c++${CXX_STANDARD}
+    )
+}
+
+# measure the average time of running a command $RUNS times
+function measure_time() {
+    local COMMAND=$1
+    local RUNS=3
+    local TOTAL_TIME=0
+
+    for ((i = 1; i <= RUNS; i++)); do
+        local OUTPUT=$({ time $COMMAND; } 2>&1)
+        # echo "$OUTPUT"
+        local TIME=$(echo "$OUTPUT" | grep real | awk '{print $2}' | sed 's/[^0-9.]*//g')
+        # echo "Run $i: $TIME seconds"
+        TOTAL_TIME=$(echo $TOTAL_TIME + $TIME | bc)
+    done
+
+    local AVERAGE_TIME=$(echo "scale=3; $TOTAL_TIME / $RUNS" | bc)
+    # echo $AVERAGE_TIME
+    printf "%.3f" $AVERAGE_TIME
+}
+
+function measure_time_ms() {
+    local COMMAND=$1
+    local RUNS=3
+    local TOTAL_TIME=0
+
+    for ((i = 1; i <= RUNS; i++)); do
+        local OUTPUT=$({ time $COMMAND; } 2>&1)
+        # echo "$OUTPUT"
+        local TIME=$(echo "$OUTPUT" | grep real | awk '{print $2}' | sed 's/[^0-9.]*//g')
+        # echo "Run $i: $TIME seconds"
+        TOTAL_TIME=$(echo $TOTAL_TIME + $TIME | bc)
+    done
+
+    local TOTAL_TIME_MS=$(echo "$TOTAL_TIME * 1000" | bc)
+    local AVERAGE_TIME_MS=$(echo "scale=0; $TOTAL_TIME_MS / $RUNS" | bc)
+    # local AVERAGE_TIME=$(echo "scale=3; $TOTAL_TIME / $RUNS" | bc)
+    echo $AVERAGE_TIME_MS
+    # printf "%.1f" $AVERAGE_TIME_MS
+}
+
+function append_result() {
+    local MACRO_NAME=$1
+    local TIME=$2
+    echo "\\DefMacro{$MACRO_NAME}{$TIME}" >> $OUTPUT_FILE
+}
+
+function append_result_gcc() {
+    local MACRO_NAME=$1
+    local TIME=$2
+    echo "\\DefMacro{$MACRO_NAME}{$TIME}" >> $GCC_OUTPUT_FILE
+}
+
+# measure time for all examples
+function measure_all() {
+    # ensure the output file is empty
+    > $OUTPUT_FILE
+    echo "%% auto generated by s" >> $OUTPUT_FILE
+    
+    precompile_kokkos_header
+
+    for dir in "${KOKKOS_KERNEL_DIRS[@]}"; do
+        (
+        if [ ! -d "$dir/build/${COMPILER}" ]; then
+            mkdir $dir/build/${COMPILER}
+        fi
+        cd $dir
+        echo "Measuring time for $dir"
+        # clang++ --version
+        OLD_TIME=$(measure_time_ms "$NORMAL_COMMAND")
+        PCH_TIME=$(measure_time_ms "$CLANG_PCH_COMMAND")
+        YALLA_TIME=$(measure_time_ms "$YALLA_COMMAND")
+        echo "Old time: $OLD_TIME"
+        echo "Pch time: $PCH_TIME"
+        echo "Yalla time: $YALLA_TIME"
+        PCH_SPEEDUP=$(echo "scale=1; $OLD_TIME / $PCH_TIME" | bc)
+        YALLA_SPEEDUP=$(echo "scale=1; $OLD_TIME / $YALLA_TIME" | bc)
+        echo "Pch speedup: $PCH_SPEEDUP"
+        echo "Yalla speedup: $YALLA_SPEEDUP"
+        append_result "${dir%/}OldCompilation" $OLD_TIME
+        append_result "${dir%/}PchCompilation" $PCH_TIME
+        append_result "${dir%/}YallaCompilation" $YALLA_TIME
+        append_result "${dir%/}PchCompilationSpeedup" $PCH_SPEEDUP
+        append_result "${dir%/}YallaCompilationSpeedup" $YALLA_SPEEDUP
+        )
+    done
+}
+
+function measure_all_gcc() {
+    COMPILER="g++"
+
+    > $GCC_OUTPUT_FILE
+    echo "%% auto generated by s" >> $GCC_OUTPUT_FILE
+
+    ( cd ${KOKKOS_INCLUDE_PATH}
+    rm *.gch )
+
+    declare -A OLD_TIMES
+    for dir in "${KOKKOS_KERNEL_DIRS[@]}"; do
+        if [ ! -d "$dir/build/${COMPILER}" ]; then
+            mkdir $dir/build/${COMPILER}
+        fi
+        cd $dir
+        echo "Measuring old time for $dir"
+        OLD_TIME=$(measure_time_ms "$NORMAL_COMMAND")
+        YALLA_TIME=$(measure_time_ms "$YALLA_COMMAND")
+        YALLA_SPEEDUP=$(echo "scale=1; $OLD_TIME / $YALLA_TIME" | bc)
+        echo "Old time: $OLD_TIME"
+        echo "Yalla time: $YALLA_TIME"
+        echo "Yalla speedup: $YALLA_SPEEDUP"
+        # append_result_gcc "GCC_${dir%/}OldCompilation" $OLD_TIME
+        # append_result_gcc "GCC_${dir%/}YallaCompilation" $YALLA_TIME
+        # append_result_gcc "GCC_${dir%/}YallaCompilationSpeedup" $YALLA_SPEEDUP
+        append_result_gcc "${dir%/}OldCompilationGCC" $OLD_TIME
+        append_result_gcc "${dir%/}YallaCompilationGCC" $YALLA_TIME
+        append_result_gcc "${dir%/}YallaCompilationSpeedupGCC" $YALLA_SPEEDUP
+        OLD_TIMES["$dir"]=$OLD_TIME
+        cd ..
+    done
+    # declare -p OLD_TIMES
+
+    precompile_kokkos_header
+
+    for dir in "${KOKKOS_KERNEL_DIRS[@]}"; do
+        cd $dir
+
+        echo "Measuring pch time for $dir"
+        PCH_TIME=$(measure_time_ms "$NORMAL_COMMAND")
+        OLD_TIME=${OLD_TIMES["$dir"]}
+        PCH_SPEEDUP=$(echo "scale=1; $OLD_TIME / $PCH_TIME" | bc)
+        echo "old time: $OLD_TIME"
+        echo "Pch time: $PCH_TIME"
+        echo "Pch speedup: $PCH_SPEEDUP"
+        # append_result_gcc "GCC_${dir%/}PchCompilation" $PCH_TIME
+        # append_result_gcc "GCC_${dir%/}PchCompilationSpeedup" $PCH_SPEEDUP
+        append_result_gcc "${dir%/}PchCompilationGCC" $PCH_TIME
+        append_result_gcc "${dir%/}PchCompilationSpeedupGCC" $PCH_SPEEDUP
+        cd ..
+    done
+}
+
+function generate_trace() {
+    precompile_kokkos_header
+    cd 02
+    $NORMAL_COMMAND -ftime-trace
+    mv build/clang++/kernel.normal.json build/clang++/normal_trace.json
+    $CLANG_PCH_COMMAND -ftime-trace
+    mv build/clang++/kernel.json build/clang++/pch_trace.json
+    $YALLA_COMMAND -ftime-trace
+    mv build/clang++/kernel.yalla.json build/clang++/yalla_trace.json
+}
+
+function generate_all_so_files() {
+    mkdir results
+    normal_output_file="results/compilation.normal.${COMPILER}.csv"
+    yalla_output_file="results/compilation.yalla.${COMPILER}.csv"
+
+    echo "Benchmark,Kernel time [s],Bindings time [s],Link time [s]" > "${normal_output_file}"
+    echo "Benchmark,Kernel time [s],Wrappers time [s],Bindings time [s],Link time [s]" > "${yalla_output_file}"
+
+    for kernel in "${KERNELS[@]}"; do
+        dir=$(find python_versions -name ${kernel})
+        dir=$(find ${dir} -name functor.hpp)
+        dir=$(dirname ${dir})
+        if [ -d "$dir" ]; then
+            pushd $dir
+            echo "Compiling normal in $dir"
+            kernel_time_normal=$(measure_time "$NORMAL_COMMAND")
+            bindings_time_normal=$(measure_time "$NORMAL_BINDINGS_COMMAND")
+            link_time_normal=$(measure_time "$NORMAL_LINK_COMMAND")
+            # kernel_time_pch=$(measure_time "$GCC_PCH_COMMAND")
+
+            echo "Compiling yalla in $dir"
+            kernel_time_yalla=$(measure_time "$YALLA_COMMAND")
+            wrappers_time_yalla=$(measure_time "$YALLA_WRAPPERS_COMMAND")
+            bindings_time_yalla=$(measure_time "$YALLA_BINDINGS_COMMAND")
+            link_time_yalla=$(measure_time "$YALLA_LINK_COMMAND")
+            popd
+
+            echo "${kernel},${kernel_time_normal},${bindings_time_normal},${link_time_normal}" >> "${normal_output_file}"
+            echo "${kernel},${kernel_time_yalla},${wrappers_time_yalla},${bindings_time_yalla},${link_time_yalla}" >> "${yalla_output_file}"
+        fi
+    done
+}
+
+function copy_so_files() {
+    mode="${1}"
+
+    for kernel in "${KERNELS[@]}"; do
+        dir=$(find python_versions -name ${kernel})
+        dir=$(find ${dir} -name functor.hpp)
+        dir=$(dirname ${dir})
+        echo "entering ${dir}"
+        if [ -d "$dir" ]; then
+            pushd "${dir}"
+            cp ${MODULE}.${mode} OpenMP/${MODULE}
+            patchelf --add-rpath "${KOKKOS_LIB_PATH}" OpenMP/${MODULE}
+            popd
+        fi
+    done
+}
+
+function run_benchmarks() {
+    source activate pyk_cgo
+    export KOKKOS_TOOLS_LIBS=${PWD}/kokkos-tools/profiling/simple-kernel-timer/kp_kernel_timer.so
+    KP_READER=${PWD}/kokkos-tools/profiling/simple-kernel-timer/kp_reader
+
+    for mode in "normal" "yalla"; do
+        echo "Running with mode ${mode}"
+        copy_so_files "${mode}"
+        
+        kernels_output_file="results/kernels.${mode}.${COMPILER}.csv"
+        total_output_file="results/total.${mode}.${COMPILER}.csv"
+        echo "Benchmark,Kernel,${mode} time [s]" > "${kernels_output_file}"
+        echo "Total,${mode} time [s]" > "${total_output_file}"
+
+        pushd python_versions/02
+        command="python 02.py"
+
+        echo "Running command ${command}"
+
+        std_output=$(eval "${command}")
+        dat_file=$(echo "${std_output}" | tail -n 1 | cut -d' ' -f6)
+        profiler_output_02=$(eval "${KP_READER} ${dat_file}")
+
+        total_02=$(measure_time "$command")
+        rm *.dat
+        popd
+
+        kernel_02=$(echo "${profiler_output_02}" | grep "pk_functor_yAx" -A 1 | tail -n 1 | cut -d' ' -f7)
+
+        echo "02,02,${kernel_02}" >> "${kernels_output_file}"
+        echo "02,${total_02}" >> "${total_output_file}"
+
+        pushd python_versions/ExaMiniMD
+        command="python src/main.py -il input/in.lj --fill"
+
+        echo "Running command ${command}"
+
+        std_output=$(eval "${command}")
+        dat_file=$(echo "${std_output}" | tail -n 1 | cut -d' ' -f6)
+        profiler_output_examinimd=$(eval "${KP_READER} ${dat_file}")
+
+        total_exa=$(measure_time "$command")
+        rm *.dat
+        popd
+
+        kernel_binning=$(echo "${profiler_output_examinimd}" | grep -x "\- Binning::AssignOffsets" -A 1 | tail -n 1 | cut -d' ' -f7)
+        kernel_final_integrate=$(echo "${profiler_output_examinimd}" | grep -x "\- IntegratorNVE::final_integrate" -A 1 | tail -n 1 | cut -d' ' -f7)
+        kernel_fullneigh_for=$(echo "${profiler_output_examinimd}" | grep -x "\- ForceLJNeigh::compute" -A 1 | tail -n 1 | cut -d' ' -f7)
+        kernel_fullneigh_reduce=$(echo "${profiler_output_examinimd}" | grep -x "\- ForceLJNeigh::compute_energy" -A 1 | tail -n 1 | cut -d' ' -f7)
+        kernel_initial_integrate=$(echo "${profiler_output_examinimd}" | grep -x "\- IntegratorNVE::initial_integrate" -A 1 | tail -n 1 | cut -d' ' -f7)
+        kernel_get_n=$(echo "${profiler_output_examinimd}" | grep -x "\- init_s" -A 1 | tail -n 1 | cut -d' ' -f7) # currently much slower with gcc lto
+        kernel_init_x=$(echo "${profiler_output_examinimd}" | grep -x "\- init_x" -A 1 | tail -n 1 | cut -d' ' -f7)
+        kernel_temperature=$(echo "${profiler_output_examinimd}" | grep -x "\- Temperature" -A 1 | tail -n 1 | cut -d' ' -f7)
+        kernel_sort_binbinning=$(echo "${profiler_output_examinimd}" | grep -x "\- Kokkos::Sort::BinBinning" -A 1 | tail -n 1 | cut -d' ' -f7)
+        kernel_sort_bincount=$(echo "${profiler_output_examinimd}" | grep -x "\- Kokkos::Sort::BinCount" -A 1 | tail -n 1 | cut -d' ' -f7)
+        kernel_sort_binoffset=$(echo "${profiler_output_examinimd}" | grep -x "\- Kokkos::Sort::BinOffset" -A 1 | tail -n 1 | cut -d' ' -f7)
+        kernel_sort_copy=$(echo "${profiler_output_examinimd}" | grep -x "\- Kokkos::Sort::Copy" -A 1 | tail -n 1 | cut -d' ' -f7)
+        kernel_sort_copypermute=$(echo "${profiler_output_examinimd}" | grep -x "\- Kokkos::Sort::CopyPermute" -A 1 | tail -n 1 | cut -d' ' -f7)
+
+        echo "ExaMiniMD,Binning::AssignOffset,${kernel_binning}" >> "${kernels_output_file}"
+        echo "ExaMiniMD,IntegratorNVE::final_integrate,${kernel_final_integrate}" >> "${kernels_output_file}"
+        echo "ExaMiniMD,ForceLJNeigh::compute,${kernel_fullneigh_for}" >> "${kernels_output_file}"
+        echo "ExaMiniMD,ForceLJNeigh::compute_energy,${kernel_fullneigh_reduce}" >> "${kernels_output_file}"
+        echo "ExaMiniMD,IntegratorNVE::initial_integrate,${kernel_initial_integrate}" >> "${kernels_output_file}"
+        echo "ExaMiniMD,init_s,${kernel_get_n}" >> "${kernels_output_file}"
+        echo "ExaMiniMD,init_x,${kernel_init_x}" >> "${kernels_output_file}"
+        echo "ExaMiniMD,Temperature,${kernel_temperature}" >> "${kernels_output_file}"
+        echo "ExaMiniMD,Binning::AssignOffset,${kernel_binning}" >> "${kernels_output_file}"
+        echo "ExaMiniMD,Kokkos::Sort::BinBinning,${kernel_sort_binbinning}" >> "${kernels_output_file}"
+        echo "ExaMiniMD,Kokkos::Sort::BinCount,${kernel_sort_bincount}" >> "${kernels_output_file}"
+        echo "ExaMiniMD,Kokkos::Sort::BinOffset,${kernel_sort_binoffset}" >> "${kernels_output_file}"
+        echo "ExaMiniMD,Kokkos::Sort::Copy,${kernel_sort_copy}" >> "${kernels_output_file}"
+        echo "ExaMiniMD,Kokkos::Sort::CopyPermute,${kernel_sort_copypermute}" >> "${kernels_output_file}"
+        echo "ExaMiniMD,${total_exa}" >> "${total_output_file}"
+
+        pushd python_versions/team_policy
+        command="python team_policy.py --fill -S 25"
+
+        echo "Running command ${command}"
+
+        std_output=$(eval "${command}")
+        dat_file=$(echo "${std_output}" | tail -n 1 | cut -d' ' -f6)
+        profiler_output_team_policy=$(eval "${KP_READER} ${dat_file}")
+
+        total_team_policy=$(measure_time "$command")
+        rm *.dat
+        popd
+
+        kernel_team_policy=$(echo "${profiler_output_team_policy}" | grep -x "pk_functor_yAx" -A 1 | tail -n 1 | cut -d' ' -f7)
+
+        echo "team_policy,team_policy,${kernel_team_policy}" >> "${kernels_output_file}"
+        echo "team_policy,${total_team_policy}" >> "${total_output_file}"
+
+        pushd python_versions/nstream
+        command="python nstream.py 100 13"
+
+        echo "Running command ${command}"
+
+        std_output=$(eval "${command}")
+        dat_file=$(echo "${std_output}" | tail -n 1 | cut -d' ' -f6)
+        profiler_output_nstream=$(eval "${KP_READER} ${dat_file}")
+
+        total_nstream=$(measure_time "$command")
+        rm *.dat
+        popd
+
+        kernel_nstream=$(echo "${profiler_output_nstream}" | grep -x "18pk_functor_nstream" -A 1 | tail -n 1 | cut -d' ' -f7)
+
+        echo "nstream,nstream,${kernel_nstream}" >> "${kernels_output_file}"
+        echo "nstream,${total_nstream}" >> "${total_output_file}"
+    done
+}
+
+function get_LOCs_and_headers() {
+    output_file="results/stats.${COMPILER}.csv"
+
+    echo "Source,Benchmark,Normal LOCs,Normal Headers,Yalla LOCs,Yalla Headers" > "${output_file}"
+
+    for dir in "${KOKKOS_KERNEL_DIRS[@]}"; do
+        if [ -d "$dir" ]; then
+            pushd $dir
+            yalla_LOCs_command="clang++ -fopenmp -Wno-everything -E -c kernel.yalla.cpp -std=c++${CXX_STANDARD}"
+            # yalla_LOCs_command="clang++ -fopenmp -Wno-everything -c kernel.yalla.cpp -std=c++${CXX_STANDARD}"
+            default_LOCs_command="clang++ -fopenmp -Wno-everything -E -c kernel.cpp -std=c++${CXX_STANDARD} -isystem ${KOKKOS_INCLUDE_PATH}"
+            # default_LOCs_command="clang++ -fopenmp -Wno-everything -c kernel.cpp -std=c++${CXX_STANDARD} -isystem ${KOKKOS_INCLUDE_PATH}"
+
+            yalla_headers_command="clang++ -fopenmp -Wno-everything -H -c kernel.yalla.cpp -std=c++${CXX_STANDARD}"
+            # yalla_headers_command="clang++ -fopenmp -Wno-everything -c kernel.yalla.cpp -std=c++${CXX_STANDARD}"
+            default_headers_command="clang++ -fopenmp -Wno-everything -H -c kernel.cpp -std=c++${CXX_STANDARD} -isystem ${KOKKOS_INCLUDE_PATH}"
+            # default_headers_command="clang++ -fopenmp -Wno-everything -c kernel.cpp -std=c++${CXX_STANDARD} -isystem ${KOKKOS_INCLUDE_PATH}"
+
+            yalla_LOCs=$($yalla_LOCs_command | wc -l)
+            # eval $yalla_LOCs_command
+            default_LOCs=$($default_LOCs_command | wc -l)
+            # eval $default_LOCs_command
+            yalla_headers=$($yalla_headers_command 2>&1 >/dev/null | wc -l)
+            # eval $yalla_headers_command
+            default_headers=$($default_headers_command 2>&1 >/dev/null | wc -l)
+            # eval $default_headers_command
+            popd
+
+            echo "PyKokkos,${dir},${default_LOCs},${default_headers},${yalla_LOCs},${yalla_headers}" >> "${output_file}"
+        fi
+    done
+}
+
+function setup_pykokkos() {
+    git clone https://github.com/kokkos/pykokkos-base.git
+    pushd pykokkos-base
+    git checkout b8694f5 # This sets the Kokkos version to 3.7.02
+    conda create -n pyk_cgo --file requirements.txt python=3.11 pybind11 patchelf
+    source activate pyk_cgo
+    python setup.py install -- -DENABLE_LAYOUTS=ON -DENABLE_MEMORY_TRAITS=OFF -DENABLE_VIEW_RANKS=3 \
+    -DENABLE_CUDA=OFF -DKokkos_ENABLE_CUDA=OFF -DENABLE_THREADS=OFF -DKokkos_ENABLE_THREADS=OFF \
+    -DENABLE_SERIAL=ON -DKokkos_ENABLE_SERIAL=ON -DENABLE_OPENMP=ON -DKokkos_ENABLE_OPENMP=ON
+    popd
+
+    git clone https://github.com/kokkos/pykokkos.git
+    pushd pykokkos
+    git checkout 3d4afd2 # Commit from the paper
+    pip install --user -e .
+    popd
+
+    git clone https://github.com/kokkos/kokkos-tools.git
+    pushd kokkos-tools
+    git checkout c3e85a6e4d164951ab79b798c600fd931445e989
+    pushd profiling/simple-kernel-timer
+    make
+    popd
+    popd
+}
+
+# Run all pykokkos code initially to generate pk_cpp/
+function run_pyk_initial() {
+    source activate pyk_cgo
+
+    pushd python_versions/02
+    rm -r pk_cpp
+    python 02.py
+    popd
+
+    pushd python_versions/ExaMiniMD
+    rm -r pk_cpp
+    export PK_EXA_SPACE=OpenMP
+    python src/main.py -il input/in.lj --fill
+    popd
+
+    pushd python_versions/nstream
+    rm -r pk_cpp
+    python nstream.py 100 13
+    popd
+
+    pushd python_versions/team_policy
+    rm -r pk_cpp
+    python team_policy.py --fill -S 25
+    popd
+}
+
+# The C++ generated by PyKokkos needs to be adjusted to work with
+# Yalla. Specifically, we need to separate the kernel into its own cpp
+# file and do some other minor changes.
+function setup_cpp_for_yalla() {
+    for kernel in "${KERNELS[@]}"; do
+        modified_functor_path=${PWD}/cpp_versions/${kernel}/functor.hpp
+        modified_kernel_path=${PWD}/cpp_versions/${kernel}/kernel.cpp
+        normal_bindings_path=${PWD}/cpp_versions/${kernel}/bindings.normal.cpp
+        yalla_bindings_path=${PWD}/cpp_versions/${kernel}/bindings.yalla.cpp
+
+        kernel_dir=$(find python_versions -name ${kernel})
+
+        pushd ${kernel_dir}
+        functor_path=$(find -name functor.hpp)
+        bindings_path=$(find -name bindings.cpp)
+        bindings_dir=$(dirname ${bindings_path})
+        clang-format -i ${bindings_path}
+        module_id=$(grep ", k) {" ${bindings_path} | cut -d, -f1 | xargs)
+        echo "${module_id}"
+
+        functor_dir=$(dirname ${functor_path})
+        new_normal_bindings_path=${bindings_dir}/bindings.normal.cpp
+        new_yalla_bindings_path=${bindings_dir}/bindings.yalla.cpp
+
+        cp ${modified_functor_path} ${functor_dir}
+        cp ${modified_kernel_path} ${functor_dir}
+        cp ${normal_bindings_path} ${new_normal_bindings_path}
+        cp ${yalla_bindings_path} ${new_yalla_bindings_path}
+
+        sed -i -e "s/PLACEHOLDER/${module_id}/g" ${new_normal_bindings_path}
+        sed -i -e "s/PLACEHOLDER/${module_id}/g" ${new_yalla_bindings_path}
+        popd
+    done
+}
+
+function run_yalla() {
+    for kernel in "${KERNELS[@]}"; do
+        kernel_dir=$(find python_versions -name ${kernel})
+        kernel_dir=$(find ${kernel_dir} -name functor.hpp)
+        kernel_dir=$(dirname ${kernel_dir})
+        pushd ${kernel_dir}
+
+        functor_path=$(find -name functor.hpp)
+        kernel_path=$(find -name kernel.cpp)
+
+        /home/nalawar/projects/yalla/llvm-install-cgo/bin/clang-yalla --header_dir "${KOKKOS_INCLUDE_PATH}" "${kernel_path}" \
+        --input_headers "${functor_path}" -- -isystem "${KOKKOS_INCLUDE_PATH}" -DEXEC_SPACE=Kokkos::OpenMP -Dpk_exec_space=Kokkos::OpenMP -fopenmp
+
+        sed -i '/#include <Kokkos_Core.hpp>/d' kernel.yalla.cpp
+        sed -i 's/#include "functor.hpp"/#include "functor.yalla.hpp"/g' kernel.yalla.cpp
+        popd
+    done
+}
+
+# -----------
+# Main
+# -----------
+
+# setup_pykokkos
+# run_pyk_initial
+# setup_cpp_for_yalla
+# run_yalla
+# generate_all_so_files
+# run_benchmarks
+
+"$@"
