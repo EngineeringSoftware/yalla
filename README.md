@@ -4,7 +4,8 @@ To generate the paper's results, run:
 ./run.sh run_all
 ```
 The `setup_all` process takes around 40 mins and `run_all` takes
-around 30 mins depending on your machine.
+around 30 mins depending on your machine. 30GB of free disk space
+is expected.
 
 All results will be generated in the `results/` directory. All
 compilation time results are in CSV files that start with
