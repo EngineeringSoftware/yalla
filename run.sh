@@ -31,6 +31,11 @@ KERNELS=("02_yAx" "binning_kksort_BinningKKSort" "force_lj_neigh_fullneigh_reduc
 
 declare -g -A pch_times
 
+normal_comp_time_02=0
+yalla_tool_time_02=0
+yalla_comp_time_02=0
+yalla_wrapper_time_02=0
+
 # compilation command
 YALLA_COMMAND="${COMPILER} \
     -I. \
@@ -948,8 +953,13 @@ function run_yalla_pyk() {
         functor_path=$(find -name functor.hpp)
         kernel_path=$(find -name kernel.cpp)
 
-        $YALLA_PATH --header_dir "${KOKKOS_INCLUDE_PATH}" "${kernel_path}" \
-        --input_headers "${functor_path}" -- -isystem "${KOKKOS_INCLUDE_PATH}" -DEXEC_SPACE=Kokkos::OpenMP -Dpk_exec_space=Kokkos::OpenMP -fopenmp
+        if [ "${kernel}" == "02_yAx" ]; then
+            echo "Measuring time of running Yalla for kernel 02_yAx"
+            yalla_tool_time_02=$(measure_time "$YALLA_PATH --header_dir ${KOKKOS_INCLUDE_PATH} ${kernel_path} --input_headers ${functor_path} -- -isystem ${KOKKOS_INCLUDE_PATH} -DEXEC_SPACE=Kokkos::OpenMP -Dpk_exec_space=Kokkos::OpenMP -fopenmp")
+        else
+            $YALLA_PATH --header_dir "${KOKKOS_INCLUDE_PATH}" "${kernel_path}" \
+            --input_headers "${functor_path}" -- -isystem "${KOKKOS_INCLUDE_PATH}" -DEXEC_SPACE=Kokkos::OpenMP -Dpk_exec_space=Kokkos::OpenMP -fopenmp
+        fi
 
         sed -i '/#include <Kokkos_Core.hpp>/d' kernel.yalla.cpp
         sed -i 's/#include "functor.hpp"/#include "functor.yalla.hpp"/g' kernel.yalla.cpp
@@ -997,6 +1007,11 @@ function generate_all_so_files() {
             link_time_pch=$(measure_time "$NORMAL_LINK_COMMAND")
 
             if [ "${kernel}" == "02_yAx" ]; then
+                # record time for 02_yAx
+                normal_comp_time_02=${kernel_time_normal}
+                yalla_comp_time_02=${kernel_time_yalla}
+                yalla_wrapper_time_02=${wrappers_time_yalla}
+
                 $NORMAL_COMMAND -ftime-trace
                 mv kernel.normal.json ${_DIR}/results/traces/02-normal.json
                 $YALLA_COMMAND -ftime-trace
@@ -1325,6 +1340,16 @@ function generate_drawing_trace() {
     popd
 }
 
+function get_tool_time() {
+    echo "Getting tool time"
+
+    compiler_name=$(basename ${COMPILER})
+    tool_output_file="results/tool_time.${compiler_name}.csv"
+    echo "Mode, Tool time [s], Compilation time[s], Wrappers time[s]" > "${tool_output_file}"
+    echo "Default,0,${normal_comp_time_02},0" >> "${tool_output_file}"
+    echo "Yalla,${yalla_tool_time_02},${yalla_comp_time_02},${yalla_wrapper_time_02}" >> "${tool_output_file}"
+}
+
 function setup_all() {
     setup_compiler
     setup_yalla
@@ -1354,6 +1379,7 @@ function run_all() {
     setup_pykokkos_cpp_for_yalla
     run_yalla_pyk
     generate_all_so_files
+    get_tool_time
     run_benchmarks
 
     # Do the rest
