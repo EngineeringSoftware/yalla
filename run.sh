@@ -1343,8 +1343,8 @@ function generate_drawing_trace() {
 function get_tool_time() {
     echo "Getting tool time"
 
-    compiler_name=$(basename ${COMPILER})
-    tool_output_file="results/tool_time.${compiler_name}.csv"
+    local compiler_name=$(basename ${COMPILER})
+    local tool_output_file="results/tool_time.${compiler_name}.csv"
     echo "Mode, Tool time [s], Compilation time[s], Wrappers time[s]" > "${tool_output_file}"
     echo "Default,0,${normal_comp_time_02},0" >> "${tool_output_file}"
     echo "Yalla,${yalla_tool_time_02},${yalla_comp_time_02},${yalla_wrapper_time_02}" >> "${tool_output_file}"
