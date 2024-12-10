@@ -1136,7 +1136,7 @@ function run_benchmarks() {
         rm *.dat
         popd
 
-        kernel_team_policy=$(echo "${profiler_output_team_policy}" | grep -x "pk_functor_yAx" -A 1 | tail -n 1 | cut -d' ' -f7)
+        kernel_team_policy=$(echo "${profiler_output_team_policy}" | grep "pk_functor_yAx" -A 1 | tail -n 1 | cut -d' ' -f7)
 
         echo "team_policy,team_policy,${kernel_team_policy}" >> "${kernels_output_file}"
         echo "team_policy,${total_team_policy}" >> "${total_output_file}"
@@ -1154,7 +1154,7 @@ function run_benchmarks() {
         rm *.dat
         popd
 
-        kernel_nstream=$(echo "${profiler_output_nstream}" | grep -x "18pk_functor_nstream" -A 1 | tail -n 1 | cut -d' ' -f7)
+        kernel_nstream=$(echo "${profiler_output_nstream}" | grep "pk_functor_nstream" -A 1 | tail -n 1 | cut -d' ' -f7)
 
         echo "nstream,nstream,${kernel_nstream}" >> "${kernels_output_file}"
         echo "nstream,${total_nstream}" >> "${total_output_file}"
